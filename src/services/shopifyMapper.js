@@ -63,7 +63,6 @@ export function mapShopifyOrderToSectoriceImportItem(order) {
     externalOrderId: order?.id != null ? String(order.id) : null,
     externalShipmentId: null,
     externalPackageRef: order?.name ? String(order.name) : null,
-    serviceType: 'DELIVERY',
     recipientName,
     phone: buildPhone(order),
     address,

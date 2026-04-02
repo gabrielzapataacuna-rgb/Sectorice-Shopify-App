@@ -75,3 +75,30 @@ export function mapShopifyOrderToSectoriceImportItem(order) {
     originComuna: null,
   };
 }
+
+export function getShopifyCompleteness(order) {
+  const missing = [];
+  const name = firstNonBlank(
+    order?.shipping_address?.name,
+    [order?.customer?.first_name, order?.customer?.last_name].filter(Boolean).join(' '),
+    order?.customer?.name
+  );
+
+  if (!name) {
+    missing.push('recipientName');
+  }
+
+  const address = [order?.shipping_address?.address1, order?.shipping_address?.address2]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join(', ');
+
+  if (!address) {
+    missing.push('address');
+  }
+
+  if (!order?.shipping_address?.city) {
+    missing.push('comuna');
+  }
+
+  return { complete: missing.length === 0, missing };
+}

@@ -1,6 +1,8 @@
 import express from 'express';
 import crypto from 'crypto';
 import axios from 'axios';
+import { deleteShop, saveShop } from '../db/database.js';
+import { registerWebhooks } from '../services/webhookRegistrar.js';
 
 const SHOP_REGEX = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i;
 
@@ -33,7 +35,19 @@ function buildOAuthHmac(secret, query) {
     .digest('hex');
 }
 
-export function createAuthRouter({ appConfig, oauthStateStore, shopInstallStore }) {
+function verifyWebhookHmac(rawBody, providedHmac, secret) {
+  if (!providedHmac || !secret) {
+    return false;
+  }
+
+  const digest = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
+  return (
+    digest.length === String(providedHmac).length &&
+    crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(String(providedHmac)))
+  );
+}
+
+export function createAuthRouter({ appConfig, oauthStateStore }) {
   const router = express.Router();
 
   router.get('/auth', (req, res) => {
@@ -99,20 +113,29 @@ export function createAuthRouter({ appConfig, oauthStateStore, shopInstallStore 
         }
       );
 
-      shopInstallStore.set(normalizedShop, {
-        accessToken: tokenResponse.data.access_token,
-        scope: tokenResponse.data.scope,
-        installedAt: new Date().toISOString(),
-      });
+      const accessToken = tokenResponse.data.access_token;
+      const scope = tokenResponse.data.scope || '';
+
+      saveShop(normalizedShop, accessToken, scope);
+      const webhookResults = await registerWebhooks(normalizedShop, accessToken, appConfig.shopifyAppUrl);
       oauthStateStore.delete(state);
+
+      const webhookRows = webhookResults.map((result) => `
+        <li>
+          <strong>${result.topic}</strong>: ${result.status}
+          ${result.id ? `(id ${result.id})` : ''}
+          ${result.error ? ` - ${result.error}` : ''}
+        </li>
+      `).join('');
 
       return res.status(200).send(`
         <html>
           <body style="font-family: sans-serif; padding: 24px;">
             <h2>Shopify conectado con Sectorice</h2>
             <p>Tienda: <strong>${normalizedShop}</strong></p>
-            <p>La instalación OAuth quedó registrada en memoria.</p>
-            <p>Para producción, persiste access tokens en una base de datos.</p>
+            <p>La instalación OAuth quedó persistida en SQLite.</p>
+            <p>Webhooks registrados:</p>
+            <ul>${webhookRows}</ul>
           </body>
         </html>
       `);
@@ -120,6 +143,30 @@ export function createAuthRouter({ appConfig, oauthStateStore, shopInstallStore 
       console.error('[shopify-auth] Error exchanging token', error?.response?.data || error.message);
       return res.status(500).send('No se pudo completar OAuth con Shopify.');
     }
+  });
+
+  router.post('/webhooks/app/uninstalled', express.raw({ type: 'application/json' }), (req, res) => {
+    const hmac = req.get('X-Shopify-Hmac-Sha256');
+    const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+
+    if (!verifyWebhookHmac(rawBody, hmac, appConfig.shopifyApiSecret)) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid Shopify webhook signature',
+      });
+    }
+
+    const shop = normalizeShop(req.get('X-Shopify-Shop-Domain'));
+    if (shop) {
+      deleteShop(shop);
+      console.log(`[shopify-auth] App uninstalled for ${shop}`);
+    }
+
+    return res.status(202).json({
+      success: true,
+      shop,
+      message: 'Shop removed from local SQLite store.',
+    });
   });
 
   return router;

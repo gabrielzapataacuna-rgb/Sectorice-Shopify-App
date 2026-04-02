@@ -29,9 +29,7 @@ const appConfig = {
 };
 
 // Scaffold simple: almacenamiento en memoria.
-// Para producción real conviene persistir tiendas/tokens en DB o Redis.
 const oauthStateStore = new Map();
-const shopInstallStore = new Map();
 
 const app = express();
 
@@ -44,8 +42,8 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/webhooks', express.raw({ type: 'application/json' }));
-app.use('/shopify', createAuthRouter({ appConfig, oauthStateStore, shopInstallStore }));
-app.use('/webhooks', createWebhooksRouter({ appConfig, shopInstallStore }));
+app.use('/shopify', createAuthRouter({ appConfig, oauthStateStore }));
+app.use('/webhooks', createWebhooksRouter({ appConfig }));
 
 app.use(express.json());
 

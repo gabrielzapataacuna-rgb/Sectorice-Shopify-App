@@ -1,6 +1,7 @@
 import express from 'express';
 import crypto from 'crypto';
-import { mapShopifyOrderToSectoriceImportItem } from '../services/shopifyMapper.js';
+import { getTrackedOrder, upsertTrackedOrder } from '../db/database.js';
+import { getShopifyCompleteness, mapShopifyOrderToSectoriceImportItem } from '../services/shopifyMapper.js';
 import { importOrdersToSectorice } from '../services/sectoriceClient.js';
 
 function verifyShopifyWebhookHmac(rawBody, providedHmac, secret) {
@@ -34,12 +35,19 @@ async function forwardOrderToSectorice(order, appConfig) {
   });
 }
 
+function buildPayloadHash(order) {
+  return crypto.createHash('sha256').update(JSON.stringify(order || {})).digest('hex');
+}
+
 export function createWebhooksRouter({ appConfig }) {
   const router = express.Router();
 
   async function handleOrderWebhook(req, res, next) {
+    let parsed;
     try {
-      const { rawBody, parsed } = parseWebhookBody(req);
+      const result = parseWebhookBody(req);
+      parsed = result.parsed;
+      const { rawBody } = result;
       const hmac = req.get('X-Shopify-Hmac-Sha256');
 
       if (!verifyShopifyWebhookHmac(rawBody, hmac, appConfig.shopifyApiSecret)) {
@@ -53,16 +61,26 @@ export function createWebhooksRouter({ appConfig }) {
       const topic = req.get('X-Shopify-Topic');
       const webhookId = req.get('X-Shopify-Webhook-Id');
 
-      const sectoriceResponse = await forwardOrderToSectorice(parsed, appConfig);
+      const forwardResult = await forwardOrderToSectoriceWithTracking(shop, parsed, appConfig);
 
       return res.status(200).json({
         success: true,
         topic,
         shop,
         webhookId,
-        sectorice: sectoriceResponse,
+        trackingStatus: forwardResult.status,
+        sectorice: forwardResult.sectoriceResponse ?? null,
       });
     } catch (error) {
+      if (error.message && error.message.includes('recipientName')) {
+        console.log('[shopify-webhook] PAYLOAD shipping_address:', JSON.stringify(parsed?.shipping_address));
+        console.log('[shopify-webhook] PAYLOAD customer.first_name:', parsed?.customer?.first_name);
+        console.log('[shopify-webhook] PAYLOAD customer.last_name:', parsed?.customer?.last_name);
+        console.log('[shopify-webhook] PAYLOAD customer.email:', parsed?.customer?.email);
+        console.log('[shopify-webhook] PAYLOAD customer.default_address:', JSON.stringify(parsed?.customer?.default_address));
+        console.log('[shopify-webhook] PAYLOAD shipping_address completo:', JSON.stringify(parsed?.shipping_address));
+        console.log('[shopify-webhook] PAYLOAD billing_address:', JSON.stringify(parsed?.billing_address));
+      }
       return next(error);
     }
   }
@@ -103,4 +121,51 @@ export function createWebhooksRouter({ appConfig }) {
   });
 
   return router;
+}
+
+async function forwardOrderToSectoriceWithTracking(shop, parsed, appConfig) {
+  const orderId = parsed?.id != null ? String(parsed.id) : null;
+  if (!orderId) {
+    throw new Error('Shopify order.id es obligatorio para Sectorice');
+  }
+
+  const payloadHash = buildPayloadHash(parsed);
+  const trackedOrder = getTrackedOrder(shop, orderId);
+  if (
+    trackedOrder &&
+    trackedOrder.payload_hash === payloadHash &&
+    ['imported', 'pending_barcode_only_candidate'].includes(trackedOrder.import_status)
+  ) {
+    console.log(`[shopify-webhook] Pedido ${orderId} omitido por idempotencia local (${trackedOrder.import_status})`);
+    return {
+      status: trackedOrder.import_status,
+      sectoriceResponse: null,
+    };
+  }
+
+  const completeness = getShopifyCompleteness(parsed);
+  if (!completeness.complete) {
+    const reason = `Faltan: ${completeness.missing.join(', ')}`;
+    upsertTrackedOrder(shop, orderId, 'pending_barcode_only_candidate', payloadHash, reason);
+    console.log(`[shopify-webhook] Pedido ${orderId} clasificado como barcode_only_candidate`);
+    return {
+      status: 'pending_barcode_only_candidate',
+      sectoriceResponse: null,
+    };
+  }
+
+  try {
+    const sectoriceResponse = await forwardOrderToSectorice(parsed, appConfig);
+    upsertTrackedOrder(shop, orderId, 'imported', payloadHash, null);
+    console.log(`[shopify-webhook] Pedido ${orderId} importado OK`);
+    return {
+      status: 'imported',
+      sectoriceResponse,
+    };
+  } catch (error) {
+    const message = error?.response?.data?.message || error?.message || 'Error desconocido';
+    upsertTrackedOrder(shop, orderId, 'error_forward', payloadHash, message);
+    console.error(`[shopify-webhook] Error al importar pedido ${orderId}:`, message);
+    throw error;
+  }
 }

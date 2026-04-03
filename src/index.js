@@ -10,7 +10,7 @@ const requiredEnv = [
   'SHOPIFY_API_SECRET',
   'SHOPIFY_APP_URL',
   'SECTORICE_API_URL',
-  'SECTORICE_API_KEY',
+  'SHOPIFY_ADAPTER_TOKEN',
 ];
 
 const missingEnv = requiredEnv.filter((key) => !process.env[key] || !process.env[key].trim());
@@ -23,7 +23,7 @@ const appConfig = {
   shopifyApiSecret: process.env.SHOPIFY_API_SECRET || '',
   shopifyAppUrl: (process.env.SHOPIFY_APP_URL || 'http://localhost:3000').replace(/\/$/, ''),
   sectoriceApiUrl: (process.env.SECTORICE_API_URL || 'https://sectorice.cl').replace(/\/$/, ''),
-  sectoriceApiKey: process.env.SECTORICE_API_KEY || '',
+  shopifyAdapterToken: process.env.SHOPIFY_ADAPTER_TOKEN || '',
   port: Number(process.env.PORT || 3000),
   scopes: ['read_orders'],
 };

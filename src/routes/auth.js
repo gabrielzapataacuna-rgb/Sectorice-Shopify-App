@@ -1,8 +1,11 @@
 import express from 'express';
 import crypto from 'crypto';
 import axios from 'axios';
-import { deleteShop, saveShop } from '../db/database.js';
 import { registerWebhooks } from '../services/webhookRegistrar.js';
+import {
+  registerShopifyInstallation,
+  unregisterShopifyInstallation,
+} from '../services/sectoriceClient.js';
 
 const SHOP_REGEX = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i;
 
@@ -20,6 +23,11 @@ function buildCallbackUrl(shopifyAppUrl) {
 
 function buildState() {
   return crypto.randomBytes(24).toString('hex');
+}
+
+function parseIntegrationId(rawValue) {
+  const parsed = Number.parseInt(String(rawValue ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function buildOAuthHmac(secret, query) {
@@ -52,16 +60,24 @@ export function createAuthRouter({ appConfig, oauthStateStore }) {
 
   router.get('/auth', (req, res) => {
     const shop = normalizeShop(req.query.shop);
+    const integrationId = parseIntegrationId(req.query.integrationId);
     if (!shop) {
       return res.status(400).json({
         success: false,
         message: 'Parámetro shop inválido. Debe ser algo como tienda.myshopify.com',
       });
     }
+    if (!integrationId) {
+      return res.status(400).json({
+        success: false,
+        message: 'integrationId es obligatorio para asociar la tienda Shopify a una integración Sectorice.',
+      });
+    }
 
     const state = buildState();
     oauthStateStore.set(state, {
       shop,
+      integrationId,
       createdAt: Date.now(),
     });
 
@@ -116,7 +132,14 @@ export function createAuthRouter({ appConfig, oauthStateStore }) {
       const accessToken = tokenResponse.data.access_token;
       const scope = tokenResponse.data.scope || '';
 
-      saveShop(normalizedShop, accessToken, scope);
+      await registerShopifyInstallation({
+        sectoriceApiUrl: appConfig.sectoriceApiUrl,
+        adapterToken: appConfig.shopifyAdapterToken,
+        integrationId: pendingState.integrationId,
+        shopDomain: normalizedShop,
+        accessToken,
+        scope,
+      });
       const webhookResults = await registerWebhooks(normalizedShop, accessToken, appConfig.shopifyAppUrl);
       oauthStateStore.delete(state);
 
@@ -133,7 +156,7 @@ export function createAuthRouter({ appConfig, oauthStateStore }) {
           <body style="font-family: sans-serif; padding: 24px;">
             <h2>Shopify conectado con Sectorice</h2>
             <p>Tienda: <strong>${normalizedShop}</strong></p>
-            <p>La instalación OAuth quedó persistida en SQLite.</p>
+            <p>La instalación OAuth quedó asociada a la integración Sectorice <strong>${pendingState.integrationId}</strong>.</p>
             <p>Webhooks registrados:</p>
             <ul>${webhookRows}</ul>
           </body>
@@ -145,7 +168,7 @@ export function createAuthRouter({ appConfig, oauthStateStore }) {
     }
   });
 
-  router.post('/webhooks/app/uninstalled', express.raw({ type: 'application/json' }), (req, res) => {
+  router.post('/webhooks/app/uninstalled', express.raw({ type: 'application/json' }), async (req, res) => {
     const hmac = req.get('X-Shopify-Hmac-Sha256');
     const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
 
@@ -158,14 +181,30 @@ export function createAuthRouter({ appConfig, oauthStateStore }) {
 
     const shop = normalizeShop(req.get('X-Shopify-Shop-Domain'));
     if (shop) {
-      deleteShop(shop);
-      console.log(`[shopify-auth] App uninstalled for ${shop}`);
+      try {
+        await unregisterShopifyInstallation({
+          sectoriceApiUrl: appConfig.sectoriceApiUrl,
+          adapterToken: appConfig.shopifyAdapterToken,
+          shopDomain: shop,
+        });
+        console.log(`[shopify-auth] App uninstalled for ${shop}`);
+      } catch (error) {
+        console.error('[shopify-auth] Error unregistering Shopify installation', {
+          shop,
+          message: error?.response?.data || error?.message,
+        });
+        return res.status(500).json({
+          success: false,
+          shop,
+          message: 'No se pudo desvincular la tienda en Sectorice.',
+        });
+      }
     }
 
     return res.status(202).json({
       success: true,
       shop,
-      message: 'Shop removed from local SQLite store.',
+      message: 'Shopify app desinstalada y tienda desvinculada de Sectorice.',
     });
   });
 

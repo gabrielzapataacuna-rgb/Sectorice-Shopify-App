@@ -2,7 +2,7 @@ import express from 'express';
 import crypto from 'crypto';
 import { getTrackedOrder, upsertTrackedOrder } from '../db/database.js';
 import { getShopifyCompleteness, mapShopifyOrderToSectoriceImportItem } from '../services/shopifyMapper.js';
-import { importOrdersToSectorice } from '../services/sectoriceClient.js';
+import { importOrdersToSectorice, resolveShopifyRuntimeConfig } from '../services/sectoriceClient.js';
 
 function verifyShopifyWebhookHmac(rawBody, providedHmac, secret) {
   if (!providedHmac || !secret) {
@@ -22,17 +22,26 @@ function parseWebhookBody(req) {
   return { rawBody, parsed };
 }
 
-async function forwardOrderToSectorice(order, appConfig) {
-  const mappedOrder = mapShopifyOrderToSectoriceImportItem(order);
-  return importOrdersToSectorice({
+async function forwardOrderToSectorice(shop, order, appConfig) {
+  const runtimeConfig = await resolveShopifyRuntimeConfig({
     sectoriceApiUrl: appConfig.sectoriceApiUrl,
-    apiKey: appConfig.sectoriceApiKey,
+    adapterToken: appConfig.shopifyAdapterToken,
+    shopDomain: shop,
+  });
+  const mappedOrder = mapShopifyOrderToSectoriceImportItem(order);
+  const response = await importOrdersToSectorice({
+    sectoriceApiUrl: appConfig.sectoriceApiUrl,
+    apiKey: runtimeConfig.sectoriceApiKey,
     payload: {
       uploadName: `Shopify webhook ${order.name || order.id}`,
       confirmOperational: true,
       orders: [mappedOrder],
     },
   });
+  return {
+    integrationCode: runtimeConfig.integrationCode,
+    response,
+  };
 }
 
 function buildPayloadHash(order) {
@@ -155,9 +164,9 @@ async function forwardOrderToSectoriceWithTracking(shop, parsed, appConfig) {
   }
 
   try {
-    const sectoriceResponse = await forwardOrderToSectorice(parsed, appConfig);
+    const { integrationCode, response: sectoriceResponse } = await forwardOrderToSectorice(shop, parsed, appConfig);
     upsertTrackedOrder(shop, orderId, 'imported', payloadHash, null);
-    console.log(`[shopify-webhook] Pedido ${orderId} importado OK`);
+    console.log(`[shopify-webhook] Pedido ${orderId} importado OK`, { shop, integrationCode });
     return {
       status: 'imported',
       sectoriceResponse,
@@ -165,7 +174,11 @@ async function forwardOrderToSectoriceWithTracking(shop, parsed, appConfig) {
   } catch (error) {
     const message = error?.response?.data?.message || error?.message || 'Error desconocido';
     upsertTrackedOrder(shop, orderId, 'error_forward', payloadHash, message);
-    console.error(`[shopify-webhook] Error al importar pedido ${orderId}:`, message);
+    console.error(`[shopify-webhook] Error al importar pedido ${orderId}:`, {
+      shop,
+      message,
+      response: error?.response?.data || null,
+    });
     throw error;
   }
 }

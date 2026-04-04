@@ -1,0 +1,28 @@
+client_id = "50b4f6ee0364cbbdb7e9253459e60aa6"
+name = "Sectorice"
+application_url = "https://sectorice.cl"
+embedded = false
+
+[access_scopes]
+scopes = "read_orders"
+use_legacy_install_flow = true
+
+[auth]
+redirect_urls = [
+  "https://sectorice.cl/shopify/auth/callback",
+]
+
+[webhooks]
+api_version = "2026-01"
+
+[[webhooks.subscriptions]]
+compliance_topics = ["customers/data_request"]
+uri = "https://sectorice.cl/webhooks/customers/data_request"
+
+[[webhooks.subscriptions]]
+compliance_topics = ["customers/redact"]
+uri = "https://sectorice.cl/webhooks/customers/redact"
+
+[[webhooks.subscriptions]]
+compliance_topics = ["shop/redact"]
+uri = "https://sectorice.cl/webhooks/shop/redact"

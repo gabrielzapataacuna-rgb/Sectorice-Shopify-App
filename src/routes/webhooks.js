@@ -51,15 +51,54 @@ function buildPayloadHash(order) {
 export function createWebhooksRouter({ appConfig }) {
   const router = express.Router();
 
+  function validateWebhookSignature(req, rawBody) {
+    const hmac = req.get('X-Shopify-Hmac-Sha256');
+    return verifyShopifyWebhookHmac(rawBody, hmac, appConfig.shopifyApiSecret);
+  }
+
+  function handlePrivacyWebhook(req, res) {
+    try {
+      const { rawBody } = parseWebhookBody(req);
+
+      if (!validateWebhookSignature(req, rawBody)) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid Shopify webhook signature',
+        });
+      }
+
+      const topic = req.get('X-Shopify-Topic');
+      const shop = req.get('X-Shopify-Shop-Domain');
+      const webhookId = req.get('X-Shopify-Webhook-Id');
+
+      console.log('[shopify-webhook] Privacy webhook received', {
+        topic,
+        shop,
+        webhookId,
+      });
+
+      return res.status(200).json({
+        success: true,
+        topic,
+        shop,
+      });
+    } catch (error) {
+      console.error('[shopify-webhook] Privacy webhook error', error);
+      return res.status(500).json({
+        success: false,
+        message: 'No se pudo procesar el webhook de privacidad',
+      });
+    }
+  }
+
   async function handleOrderWebhook(req, res, next) {
     let parsed;
     try {
       const result = parseWebhookBody(req);
       parsed = result.parsed;
       const { rawBody } = result;
-      const hmac = req.get('X-Shopify-Hmac-Sha256');
 
-      if (!verifyShopifyWebhookHmac(rawBody, hmac, appConfig.shopifyApiSecret)) {
+      if (!validateWebhookSignature(req, rawBody)) {
         return res.status(401).json({
           success: false,
           message: 'Invalid Shopify webhook signature',
@@ -96,13 +135,15 @@ export function createWebhooksRouter({ appConfig }) {
 
   router.post('/orders/create', handleOrderWebhook);
   router.post('/orders/paid', handleOrderWebhook);
+  router.post('/customers/data_request', handlePrivacyWebhook);
+  router.post('/customers/redact', handlePrivacyWebhook);
+  router.post('/shop/redact', handlePrivacyWebhook);
 
   router.post('/orders/cancelled', (req, res) => {
     try {
       const { rawBody, parsed } = parseWebhookBody(req);
-      const hmac = req.get('X-Shopify-Hmac-Sha256');
 
-      if (!verifyShopifyWebhookHmac(rawBody, hmac, appConfig.shopifyApiSecret)) {
+      if (!validateWebhookSignature(req, rawBody)) {
         return res.status(401).json({
           success: false,
           message: 'Invalid Shopify webhook signature',

@@ -4,6 +4,9 @@ const WEBHOOK_TOPICS = [
   'orders/create',
   'orders/paid',
   'orders/cancelled',
+  'customers/data_request',
+  'customers/redact',
+  'shop/redact',
   'app/uninstalled',
 ];
 
